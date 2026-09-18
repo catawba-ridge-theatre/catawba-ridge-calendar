@@ -3,13 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://onejynhbuesebccwssuz.supabase.co; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <meta name="description" content="Sponsor an April day and support Catawba Ridge Theatre." />
     <title>Catawba Ridge Theatre Calendar Fundraiser</title>
     <link rel="stylesheet" href="./styles.css?v=7" />
     <link rel="stylesheet" href="./admin.css?v=10" />
+    <link rel="stylesheet" href="./polish.css?v=12" />
   </head>
   <body>
     <div id="app"><div class="loading">Opening the fundraiser…</div></div>
-    <script type="module" src="./app.js?v=11"></script>
+    <noscript>This fundraiser needs JavaScript enabled to show calendars and sign in.</noscript>
+    <script type="module" src="./app.js?v=12"></script>
   </body>
 </html>

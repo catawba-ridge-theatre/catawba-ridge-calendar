@@ -1,59 +1,31 @@
-const SUPABASE_URL = "https://onejynhbuesebccwssuz.supabase.co";
-const SUPABASE_KEY = "sb_publishable_fuNq9rUAf_spgYttzXsJHg_C8NOggf2";
-const LUDUS_URL = "https://crhstheatre.ludus.com/";
-const SESSION_KEY = "crhs-fundraiser-session";
+import {createApi, escapeHTML as h, safeColor, activeRound, calendarIdentity, LUDUS_URL, SESSION_KEY} from "./core.mjs?v=12";
 const app = document.querySelector("#app");
 const weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-
-async function request(path, options = {}, authenticated = false) {
-  const session = getSession();
-  const response = await fetch(`${SUPABASE_URL}/${path}`, {
-    ...options,
-    headers: {
-      apikey: SUPABASE_KEY,
-      "Content-Type": "application/json",
-      ...(authenticated && session ? { Authorization: `Bearer ${session.access_token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({}));
-    throw new Error(problem.msg || problem.message || problem.error_description || "Something went wrong");
-  }
-  const text = await response.text();
-  return text ? JSON.parse(text) : null;
+let viewId = 0;
+const {request, list, getSession, saveSession, clearSession} = createApi({storage: localStorage,
+  onExpired: () => { location.hash = "#/login"; }});
+const current = id => id === viewId;
+function busy(button, value) {
+  button.disabled = value;
+  button.setAttribute("aria-busy", String(value));
 }
-
-function getSession() {
-  const value = localStorage.getItem(SESSION_KEY);
-  return value ? JSON.parse(value) : null;
+function errorHTML(error) { return `<p class="error" role="alert">${h(error.message)}</p><button class="pill" data-retry>Refresh this page</button>`; }
+function paymentMessage(day) {
+  return `<div class="notice">Day ${day} is reserved. Complete your payment on Ludus.<a href="${LUDUS_URL}" target="_blank" rel="noopener noreferrer">Open Ludus in a new tab →</a></div>`;
 }
 
 async function loadPeople() {
   const [people, days] = await Promise.all([
-    request("rest/v1/participants?select=id,slug,name,initials,color,raised,goal&active=eq.true&order=display_order"),
-    request("rest/v1/sponsored_days?select=participant_id,day,amount,round"),
+    list("rest/v1/participants?select=id,slug,name,initials,color,raised,goal&active=eq.true&order=display_order,id"),
+    list("rest/v1/sponsored_days?select=participant_id,day,amount,round&order=id"),
   ]);
   return people.map((person) => activeRound(person, days.filter((item) => item.participant_id === person.id)));
-}
-
-function activeRound(person, reservations) {
-  let round = Math.max(1, ...reservations.map((item) => item.round));
-  if (reservations.filter((item) => item.round === round).length >= 30) round += 1;
-  const reservedTotal = reservations.reduce((sum, item) => sum + Number(item.amount || item.day), 0);
-  return {
-    ...person,
-    round,
-    raised: Math.max(Number(person.raised || 0), reservedTotal),
-    goal: Math.max(Number(person.goal || 465), round * 465),
-    sponsored: reservations.filter((item) => item.round === round).map((item) => item.day),
-  };
 }
 
 function header() {
   return `<header class="topbar">
     <a class="brand" href="#/"><span class="mark">CR</span><span>Catawba Ridge Theatre</span></a>
-    <nav><a href="#/">All calendars</a><a class="pill create-link" href="#/login">Create calendar</a></nav>
+    <nav><a href="#/">All calendars</a><a class="pill create-link" href="${getSession() ? '#/dashboard' : '#/login'}">${getSession() ? 'My dashboard' : 'Create calendar'}</a></nav>
   </header>`;
 }
 
@@ -61,12 +33,12 @@ function footer() {
   return `<footer><b>Catawba Ridge Theatre</b><em>Small days. Big difference.</em><span>April Calendar Fundraiser · 2027</span></footer>`;
 }
 
-function calendarGrid(person, managing = false) {
+function calendarGrid(person, readOnly = false) {
   const blanks = "<span></span>".repeat(4);
   const days = Array.from({ length: 30 }, (_, index) => {
     const day = index + 1;
     const paid = person.sponsored.includes(day);
-    return `<button data-day="${day}" class="${paid ? "sponsored" : ""}" ${!managing && paid ? "disabled" : ""}>
+    return `<button type="button" data-day="${day}" aria-label="April ${day}, ${paid ? 'reserved' : `$${day} donation`}" class="${paid ? "sponsored" : ""}" ${readOnly || paid || person.full ? "disabled" : ""}>
       <b>${day}</b><small>${paid ? "♥ Taken" : `$${day}`}</small>
     </button>`;
   }).join("");
@@ -78,6 +50,7 @@ function calendarGrid(person, managing = false) {
 }
 
 async function home() {
+  const id = viewId;
   const previewDays = Array.from({ length: 21 }, (_, index) => `<span>${index + 1}</span>`).join("");
   app.innerHTML = `${header()}<main><section class="hero">
     <div><p class="eyebrow">CATAWBA RIDGE THEATRE PRESENTS</p><h1>Every day can<br>make a <em>difference.</em></h1>
@@ -91,6 +64,7 @@ async function home() {
   </main>${footer()}`;
   try {
     const people = await loadPeople();
+    if (!current(id)) return;
     const totalRaised = people.reduce((sum, person) => sum + Number(person.raised || 0), 0);
     const availableDates = people.reduce((sum, person) => sum + (30 - person.sponsored.length), 0);
     document.querySelector("#raised-together").textContent = `$${totalRaised.toLocaleString()}`;
@@ -98,34 +72,42 @@ async function home() {
     document.querySelector("#ways-to-help").textContent = availableDates;
     document.querySelector("#cards").innerHTML = people.map((person) => {
       const percent = Math.min(100, Math.round(person.raised / person.goal * 100));
-      return `<a class="person" href="#/calendar/${person.slug}">
-        <span class="avatar" style="background:${person.color}">${person.initials}</span>
-        <span class="details"><b>${person.name}</b><i><span style="width:${percent}%"></span></i><small>$${person.raised} of $${person.goal} raised</small></span><strong>↗</strong>
+      return `<a class="person" href="#/calendar/${encodeURIComponent(person.slug)}">
+        <span class="avatar" style="background:${safeColor(person.color)}">${h(person.initials)}</span>
+        <span class="details"><b>${h(person.name)}</b><i><span style="width:${percent}%"></span></i><small>$${person.raised} of $${person.goal} reserved</small></span><strong>↗</strong>
       </a>`;
-    }).join("");
+    }).join("") || '<p>No calendars yet. Create yours to get started!</p>';
+    document.querySelector('.impact-strip > div > span').textContent = 'reserved together';
+    if (location.hash === '#how' || location.hash === '#fundraisers') document.getElementById(location.hash.slice(1))?.scrollIntoView();
   } catch (error) {
-    document.querySelector("#cards").innerHTML = `<p class="error">${error.message}</p>`;
+    if (current(id)) document.querySelector("#cards").innerHTML = errorHTML(error);
   }
 }
 
-async function personalCalendar(slug) {
+async function personalCalendar(slug, notice = "") {
+  const id = viewId;
   app.innerHTML = `${header()}<main class="personal"><p>Loading calendar…</p></main>${footer()}`;
   try {
     const people = await loadPeople();
+    if (!current(id)) return;
     const person = people.find((item) => item.slug === slug);
     if (!person) throw new Error("That calendar could not be found.");
     app.innerHTML = `${header()}<main class="personal">
-      <section><a href="#/">← All fundraisers</a><p class="eyebrow">APRIL CALENDAR FUNDRAISER</p><h1>Support<br><em>${person.name}</em></h1>
+      <section><a href="#/">← All fundraisers</a><p class="eyebrow">APRIL CALENDAR FUNDRAISER</p><h1>Support<br><em>${h(person.name)}</em></h1>
       <p class="lead">Choose an open date. The date is the donation amount, and payment is completed on Catawba Ridge Theatre’s Ludus page.</p>
-      <p class="total"><b>$${person.raised}</b> raised of $${person.goal}</p></section>
-      <section>${calendarGrid(person)}<div id="payment-note"></div></section>
+      <p class="total"><b>$${person.raised}</b> reserved of $${person.goal}</p><p class="muted">Reservations include payments awaiting admin review.</p></section>
+      <section>${calendarGrid(person)}<div id="payment-note" role="status" aria-live="polite">${notice}</div></section>
     </main>${footer()}`;
+    let saving = false;
     document.querySelectorAll(".days button:not(:disabled)").forEach((button) => {
       button.addEventListener("click", async () => {
+        if (saving || !current(id)) return;
+        saving = true;
         const day = Number(button.dataset.day);
         const paymentTab = window.open("about:blank", "_blank");
         if (paymentTab) paymentTab.opener = null;
-        button.disabled = true;
+        busy(button, true);
+        document.querySelectorAll('.days button').forEach(b => b.disabled = true);
         document.querySelector("#payment-note").innerHTML = `<div class="notice">Reserving day ${day} and opening Ludus…</div>`;
         try {
           await request("rest/v1/sponsored_days", {
@@ -134,34 +116,38 @@ async function personalCalendar(slug) {
           });
           if (paymentTab) {
             paymentTab.location.href = LUDUS_URL;
-            document.querySelector("#payment-note").innerHTML = `<div class="notice">Day ${day} is reserved. Ludus opened in a new tab.</div>`;
-          } else {
-            document.querySelector("#payment-note").innerHTML = `<div class="notice">Day ${day} is reserved. <a href="${LUDUS_URL}" target="_blank" rel="noreferrer">Open Ludus in a new tab →</a></div>`;
           }
+          if (current(id)) await personalCalendar(slug, paymentMessage(day));
         } catch (error) {
           if (paymentTab) paymentTab.close();
-          button.disabled = false;
-          document.querySelector("#payment-note").innerHTML = `<p class="error">${error.message}</p>`;
+          if (current(id)) {
+            busy(button, false);
+            document.querySelector("#payment-note").innerHTML = errorHTML(error);
+          }
         }
       });
     });
   } catch (error) {
-    document.querySelector(".personal").innerHTML = `<p class="error">${error.message}</p>`;
+    if (current(id)) document.querySelector(".personal").innerHTML = notice + errorHTML(error);
   }
 }
 
 function login() {
+  const id = viewId;
   if (getSession()) return dashboard();
   app.innerHTML = `<main class="auth"><a class="brand" href="#/"><span class="mark">CR</span><span>Catawba Ridge Theatre</span></a>
     <section class="auth-card"><p class="eyebrow" id="auth-label">CALENDAR OWNERS</p><h1 id="auth-title">Welcome<br><em>back.</em></h1>
     <p id="auth-copy">Sign in with the email and password connected to your fundraiser.</p>
-    <form id="auth-form"><label>Email<input id="email" type="email" required></label><label>Password<input id="password" type="password" minlength="8" required></label>
-    <p id="auth-message"></p><button class="button" type="submit">Sign in securely</button></form>
+    <form id="auth-form"><label>Email<input id="email" type="email" autocomplete="email" maxlength="254" required></label><label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+    <p id="auth-message" role="status" aria-live="polite"></p><button class="button" type="submit">Sign in securely</button></form>
     <button class="link-button" id="switch-auth">New participant? Create an account</button><a href="#/">← Return to all calendars</a></section></main>`;
   let creating = false;
+  let submitting = false;
   const switchButton = document.querySelector("#switch-auth");
   switchButton.addEventListener("click", () => {
     creating = !creating;
+    document.querySelector('#password').autocomplete = creating ? 'new-password' : 'current-password';
+    document.querySelector('#password').minLength = creating ? 8 : 1;
     document.querySelector("#auth-label").textContent = creating ? "JOIN THE FUNDRAISER" : "CALENDAR OWNERS";
     document.querySelector("#auth-title").innerHTML = creating ? "Create your<br><em>account.</em>" : "Welcome<br><em>back.</em>";
     document.querySelector("#auth-copy").textContent = creating ? "Create an account, then enter your own name to receive a personal April calendar." : "Sign in with the email and password connected to your fundraiser.";
@@ -171,92 +157,100 @@ function login() {
   });
   document.querySelector("#auth-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (submitting) return;
+    submitting = true;
+    const submit = event.currentTarget.querySelector('button');
+    busy(submit, true);
+    switchButton.disabled = true;
     const message = document.querySelector("#auth-message");
     message.textContent = "Please wait…";
     try {
-      const email = document.querySelector("#email").value;
+      const email = document.querySelector("#email").value.trim();
       const password = document.querySelector("#password").value;
       const data = await request(creating ? "auth/v1/signup" : "auth/v1/token?grant_type=password", {
         method: "POST", body: JSON.stringify({ email, password }),
       });
+      if (!current(id)) return;
       if (data.access_token) {
-        localStorage.setItem(SESSION_KEY, JSON.stringify(data));
+        saveSession(data);
+        document.querySelector('#password').value = '';
         location.hash = "#/dashboard";
       } else {
         message.className = "success";
         message.textContent = "Account created! Check your email to confirm it, then return here to sign in.";
-        creating = false;
       }
     } catch (error) {
-      message.className = "error";
-      message.textContent = error.message;
+      if (current(id)) { message.className = "error"; message.textContent = error.message; }
+    } finally {
+      submitting = false;
+      busy(submit, false);
+      switchButton.disabled = false;
     }
   });
 }
 
 async function dashboard() {
+  const id = viewId;
   const session = getSession();
   if (!session) return login();
   app.innerHTML = `${header()}<main class="dashboard"><div class="dash-head"><div><p class="eyebrow">YOUR CALENDAR DASHBOARD</p><h1>Your April<br><em>calendar.</em></h1></div><div class="account-actions" id="account-actions"><button class="pill" id="signout">Sign out</button></div></div><div id="dashboard-content"><p>Loading…</p></div></main>`;
   document.querySelector("#signout").addEventListener("click", async () => {
+    busy(document.querySelector('#signout'), true);
     await request("auth/v1/logout", { method: "POST" }, true).catch(() => {});
-    localStorage.removeItem(SESSION_KEY);
+    clearSession();
     location.hash = "#/";
   });
   try {
     const adminRows = await request(`rest/v1/calendar_admins?select=user_id&user_id=eq.${session.user.id}`, {}, true);
+    if (!current(id)) return;
     if (adminRows.length) {
       document.querySelector("#account-actions").insertAdjacentHTML("afterbegin", `<a class="button" href="#/admin">Admin controls</a>`);
     }
     const calendars = await request(`rest/v1/participants?select=id,slug,name,initials,raised,goal&owner_id=eq.${session.user.id}`, {}, true);
+    if (!current(id)) return;
     if (!calendars[0]) {
-      document.querySelector("#dashboard-content").innerHTML = `<section class="setup"><h2>Create your calendar</h2><form id="name-form"><label>Your full name<input id="name" required></label><p id="setup-message"></p><button class="button">Create my calendar</button></form></section>`;
+      document.querySelector("#dashboard-content").innerHTML = `<section class="setup"><h2>Create your calendar</h2><form id="name-form"><label>Your full name<input id="name" autocomplete="name" maxlength="80" required></label><p id="setup-message" role="status"></p><button class="button">Create my calendar</button></form></section>`;
+      let creatingCalendar = false;
       document.querySelector("#name-form").addEventListener("submit", async (event) => {
         event.preventDefault();
-        const name = document.querySelector("#name").value.trim();
-        const initials = name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
-        const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${session.user.id.slice(0, 6)}`;
+        if (creatingCalendar) return;
+        creatingCalendar = true;
+        const submit = event.currentTarget.querySelector('button');
+        busy(submit, true);
         try {
-          await request("rest/v1/participants", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ owner_id: session.user.id, name, slug, initials, color: "#123d2c", goal: 465, raised: 0 }) }, true);
-          dashboard();
+          const {name, initials, slug} = calendarIdentity(document.querySelector('#name').value, session.user.id);
+          await request("rest/v1/participants", { method: "POST", body: JSON.stringify({ owner_id: session.user.id, name, slug, initials, color: "#123d2c", goal: 465, raised: 0 }) }, true);
+          if (current(id)) await dashboard();
         } catch (error) {
-          document.querySelector("#setup-message").textContent = error.message;
+          if (current(id)) document.querySelector("#setup-message").textContent = error.message;
+        } finally {
+          creatingCalendar = false;
+          busy(submit, false);
         }
       });
       return;
     }
     const person = calendars[0];
-    const reservedDays = await request(`rest/v1/sponsored_days?select=day,amount,round&participant_id=eq.${person.id}`, {}, true);
+    const reservedDays = await list(`rest/v1/sponsored_days?select=day,amount,round&participant_id=eq.${person.id}&order=id`, true);
+    if (!current(id)) return;
     Object.assign(person, activeRound(person, reservedDays));
-    document.querySelector("#dashboard-content").innerHTML = `<div class="dashboard-actions"><a class="button" href="#/calendar/${person.slug}">View public calendar →</a><p>Click a day after its Ludus payment is confirmed. Click it again to reopen the day.</p></div>${calendarGrid(person, true)}<p id="dash-message"></p>`;
-    document.querySelectorAll(".days button").forEach((button) => button.addEventListener("click", async () => {
-      const day = Number(button.dataset.day);
-      const paid = person.sponsored.includes(day);
-      button.disabled = true;
+    document.querySelector("#dashboard-content").innerHTML = `<div class="dashboard-actions"><a class="button" href="#/calendar/${encodeURIComponent(person.slug)}">View public calendar →</a><button class="pill" id="share-calendar">Copy calendar link</button></div><p class="total"><b>$${person.raised}</b> reserved of $${person.goal}</p><p>Share your public calendar with supporters. Administrators review Ludus payments and reopen unpaid dates.</p>${calendarGrid(person, true)}<p id="dash-message" role="status"></p>`;
+    document.querySelector('#share-calendar').addEventListener('click', async () => {
+      const url = `${location.href.split('#')[0]}#/calendar/${encodeURIComponent(person.slug)}`;
       try {
-        if (paid) {
-          await request(`rest/v1/sponsored_days?participant_id=eq.${person.id}&day=eq.${day}&round=eq.${person.round}`, { method: "DELETE" }, true);
-          person.sponsored = person.sponsored.filter((item) => item !== day);
-        } else {
-          await request("rest/v1/sponsored_days?on_conflict=participant_id,day,round", {
-            method: "POST",
-            headers: { Prefer: "resolution=merge-duplicates" },
-            body: JSON.stringify({ participant_id: person.id, day, amount: day, paid: true, round: person.round }),
-          }, true);
-          person.sponsored.push(day);
-        }
-        dashboard();
-      } catch (error) {
-        button.disabled = false;
-        document.querySelector("#dash-message").textContent = error.message;
+        await navigator.clipboard.writeText(url);
+        if (current(id)) document.querySelector('#dash-message').textContent = 'Calendar link copied!';
+      } catch {
+        if (current(id)) document.querySelector('#dash-message').textContent = `Copy this link: ${url}`;
       }
-    }));
+    });
   } catch (error) {
-    document.querySelector("#dashboard-content").innerHTML = `<p class="error">${error.message}</p>`;
+    if (current(id)) document.querySelector("#dashboard-content").innerHTML = errorHTML(error);
   }
 }
 
 async function admin() {
+  const id = viewId;
   const session = getSession();
   if (!session) {
     location.hash = "#/login";
@@ -265,46 +259,70 @@ async function admin() {
   app.innerHTML = `${header()}<main class="dashboard admin"><div class="dash-head"><div><p class="eyebrow">ADMINISTRATOR</p><h1>All calendar<br><em>controls.</em></h1></div><a class="pill" href="#/dashboard">My dashboard</a></div><p class="lead">Use these controls to reopen a date when its payment was not completed.</p><div id="admin-content"><p>Loading calendars…</p></div></main>`;
   try {
     const adminRows = await request(`rest/v1/calendar_admins?select=user_id&user_id=eq.${session.user.id}`, {}, true);
+    if (!current(id)) return;
     if (!adminRows.length) throw new Error("This account does not have administrator access.");
     const [people, paidDays] = await Promise.all([
-      request("rest/v1/participants?select=id,name,slug&active=eq.true&order=display_order"),
-      request("rest/v1/sponsored_days?select=participant_id,day,round&order=round,day", {}, true),
+      list("rest/v1/participants?select=id,name,slug&active=eq.true&order=display_order,id"),
+      list("rest/v1/sponsored_days?select=participant_id,day,round,paid&order=participant_id,round,day", true),
     ]);
+    if (!current(id)) return;
     document.querySelector("#admin-content").innerHTML = people.map((person) => {
       const days = paidDays.filter((item) => item.participant_id === person.id);
-      return `<section class="admin-person"><div><h2>${person.name}</h2><a href="#/calendar/${person.slug}">View public calendar →</a><button class="delete-calendar" data-person="${person.id}" data-name="${person.name}">Delete calendar</button></div><div class="admin-days">${days.length ? days.map((item) => `<button class="admin-day" data-person="${person.id}" data-day="${item.day}" data-round="${item.round}">Round ${item.round} · Day ${item.day} · Reopen</button>`).join("") : "<span>No reserved dates</span>"}</div></section>`;
-    }).join("");
+      return `<section class="admin-person"><div><h2>${h(person.name)}</h2><a href="#/calendar/${encodeURIComponent(person.slug)}">View public calendar →</a><button class="delete-calendar" data-person="${h(person.id)}" data-name="${h(person.name)}">Delete calendar</button></div><div class="admin-days">${days.length ? days.map((item) => `<div class="reservation"><span>Round ${Number(item.round)} · Day ${Number(item.day)} · ${item.paid ? 'Payment confirmed' : 'Awaiting payment review'}</span>${item.paid ? '' : `<button class="confirm-payment pill" data-person="${h(person.id)}" data-day="${Number(item.day)}" data-round="${Number(item.round)}">Mark paid</button>`}<button class="admin-day" data-person="${h(person.id)}" data-day="${Number(item.day)}" data-round="${Number(item.round)}">Reopen day ${Number(item.day)}</button></div>`).join("") : "<span>No reserved dates</span>"}</div></section>`;
+    }).join("") || '<p>No active calendars to manage.</p>';
+    let changing = false;
+    document.querySelectorAll('.confirm-payment').forEach(button => button.addEventListener('click', async () => {
+      if (changing || !current(id)) return;
+      if (!window.confirm(`Have you verified the $${button.dataset.day} payment in Ludus for this calendar?`)) return;
+      changing = true;
+      busy(button, true);
+      try {
+        const rows = await request(`rest/v1/sponsored_days?select=id&participant_id=eq.${button.dataset.person}&day=eq.${button.dataset.day}&round=eq.${button.dataset.round}`, {method:'PATCH', headers:{Prefer:'return=representation'}, body:JSON.stringify({paid:true})}, true);
+        if (!rows?.length) throw new Error('That reservation changed or your admin access expired. Refresh to check.');
+        if (current(id)) await admin();
+      } catch (error) { if (current(id)) window.alert(error.message); }
+      finally { changing = false; busy(button, false); }
+    }));
     document.querySelectorAll(".admin-day").forEach((button) => button.addEventListener("click", async () => {
+      if (changing || !current(id)) return;
       const day = Number(button.dataset.day);
       if (!window.confirm(`Reopen day ${day}? It will become available on the public calendar.`)) return;
-      button.disabled = true;
+      changing = true;
+      busy(button, true);
       try {
-        await request(`rest/v1/sponsored_days?participant_id=eq.${button.dataset.person}&day=eq.${day}&round=eq.${button.dataset.round}`, { method: "DELETE" }, true);
-        admin();
+        const rows = await request(`rest/v1/sponsored_days?select=id&participant_id=eq.${button.dataset.person}&day=eq.${day}&round=eq.${button.dataset.round}`, { method: "DELETE", headers:{Prefer:'return=representation'} }, true);
+        if (!rows?.length) throw new Error('That reservation changed or your admin access expired. Refresh to check.');
+        if (current(id)) await admin();
       } catch (error) {
-        button.disabled = false;
-        window.alert(error.message);
-      }
+        if (current(id)) window.alert(error.message);
+      } finally { changing = false; busy(button, false); }
     }));
     document.querySelectorAll(".delete-calendar").forEach((button) => button.addEventListener("click", async () => {
+      if (changing || !current(id)) return;
       if (!window.confirm(`Permanently delete ${button.dataset.name}'s calendar and all of its reserved dates?`)) return;
-      button.disabled = true;
+      changing = true;
+      busy(button, true);
       try {
-        await request(`rest/v1/participants?id=eq.${button.dataset.person}`, { method: "DELETE" }, true);
-        admin();
+        const rows = await request(`rest/v1/participants?select=id&id=eq.${button.dataset.person}`, { method: "DELETE", headers:{Prefer:'return=representation'} }, true);
+        if (!rows?.length) throw new Error('That calendar changed or your admin access expired. Refresh to check.');
+        if (current(id)) await admin();
       } catch (error) {
-        button.disabled = false;
-        window.alert(error.message);
-      }
+        if (current(id)) window.alert(error.message);
+      } finally { changing = false; busy(button, false); }
     }));
   } catch (error) {
-    document.querySelector("#admin-content").innerHTML = `<p class="error">${error.message}</p>`;
+    if (current(id)) document.querySelector("#admin-content").innerHTML = errorHTML(error);
   }
 }
 
 function route() {
+  viewId++;
   const path = location.hash.replace(/^#/, "") || "/";
-  if (path.startsWith("/calendar/")) return personalCalendar(path.split("/")[2]);
+  if (path.startsWith("/calendar/")) {
+    let slug;
+    try { slug = decodeURIComponent(path.split('/')[2]); } catch { slug = ''; }
+    return personalCalendar(slug);
+  }
   if (path === "/login") return login();
   if (path === "/dashboard") return dashboard();
   if (path === "/admin") return admin();
@@ -312,4 +330,6 @@ function route() {
 }
 
 window.addEventListener("hashchange", route);
+window.addEventListener('storage', event => { if (event.key === SESSION_KEY && !event.newValue) route(); });
+app.addEventListener('click', event => { if (event.target.closest('[data-retry]')) route(); });
 route();
